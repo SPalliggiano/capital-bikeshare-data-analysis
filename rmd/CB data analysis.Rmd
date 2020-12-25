@@ -1,0 +1,396 @@
+---
+title: "Coursework I - Capital Bikeshare Data Analysis"
+output:
+  html_document:
+    df_print: paged
+    toc: true 
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r setup,include=FALSE}
+
+library("tidyverse")
+library("here")
+library("lubridate")
+library("janitor")
+
+```
+
+```{r echo = FALSE, message = FALSE}
+file_paths <- list.files(path = here("data", "data_rides"), full.names = TRUE) 
+
+rides_raw <- tibble() # empty tibble
+
+for (path in file_paths) {
+
+  rides_new <- read_csv(path)
+
+  # Binding the rows together will throw an error because the column "Start station number"
+  # (which exists in some of the files) is sometimes parsed as <double> and sometimes parsed
+  # as character. To make sure that the rows can be glued together, we must ensure that it is
+  # always coerced to <double> which is what the following code if-statement does.
+  if ("Start station number" %in% colnames(rides_new)) { # if the column "Start station number" exists
+
+    # Ensures that the column "Start station number" is <double> and not <character>.
+    rides_new <- rides_new %>%
+      mutate(`Start station number` = as.double(`Start station number`))
+  }
+
+  # Now we can bind the tables together by row.
+  rides_raw <- bind_rows(rides_raw, rides_new) 
+}
+
+```
+
+# Introduction
+
+This notebook contains the analysis of bike rides undertaken by users of
+Capital Bikeshare (CaBi), which is a publicly-owned bicycle sharing system that
+serves areas in and around Washington DC in the United States.
+
+This covers data taken between January 2019 and July 2020 inclusive. 
+
+This dataset is worth studying to identify, for example, how popular the service is, 
+how long an average ride is, what stations are the most popular (and therefore crowded!)
+and if there are any seasonal or time patterns correlated to general use. 
+
+The questions that have been selected for investigation are reported in the 
+"Questions" section.
+
+# Data
+
+The data was publicly available on the [website](https://www.capitalbikeshare.com/system-data)
+of the company, encoded as zipped CSV files, one for each month, for a total of 19 files.
+They were subsequently imported and the tables joined together by row.
+
+The resulting data frame (as tibble) contained 4,602,349 observations,
+each corresponding to a single ride. The naming convention for columns changed 
+at one point in time; therefore, columns that contained the same data (start
+station, end station, start time, end time and membership type) had to be merged
+and named according to snake_case convention.
+
+Some of the columns(variables) were eliminated, as they were not used for the
+analysis; the final, clean dataset is called `rides_clean`.
+A subset of the rows(observations) that contained latitude and longitude values
+for the start and end stations was extracted from `rides_clean` and named
+`rides_clean_latlng`.
+
+The variables in the `rides_clean_latlng` tibble were:
+
+* `duration` : the length of the rides in seconds;
+* `started_at`: the starting date and time-of-day of the rides;
+* `ended_at`: the finishing date and time-of-day of the rides;
+* `start_station_name`: the name of the start station;
+* `end_station_name`: the name of the finishing station;
+* `member_casual`: the membership type of the user;
+* `start_lat`: latitude of the starting station;
+* `start_lng`: longitude of the starting station;
+* `end_lat`: latitude of the ending station;
+* `end_lng`: longitude of the ending station;
+* `lat_diff`: difference in latitude between end and start stations (calculated);
+* `lng_diff`: difference in latitude between end and start stations (calculated)
+    
+The variables in `rides_clean` are the same, minus the last 6 columns above. 
+
+The rows were then filtered to remove all rides that lasted less than 60 seconds,
+and initially, all of the rides that lasted longer than 24 hours. 
+The first condition stems from the fact that, as stated on the company website
+
+>This data has been processed to remove trips that are taken by staff as they service and inspect the system, trips that are taken to/from any of our “test” stations at our warehouses and **any trips lasting less than 60 seconds (potentially false starts or users trying to re-dock a bike to ensure it's secure)**.
+
+The second condition is an initial sanity check to avoid counting bikes that 
+have been probably abandoned or docked incorrectly. This value will be further
+refined depending on the initial data visualisation. 
+
+```{r, echo = FALSE}
+rides_clean <- rides_raw %>%  select(!c("Start station number","End station number","Bike number","ride_id","rideable_type", "start_station_id", "end_station_id","is_equity")) %>%
+  clean_names() %>%
+  mutate(start_station_name = coalesce(start_station,start_station_name)) %>%
+  mutate(end_station_name = coalesce(end_station, end_station_name)) %>%
+  mutate(member_casual = coalesce(member_type, member_casual)) %>%
+  mutate(started_at = coalesce(start_date, started_at)) %>%
+  mutate(ended_at = coalesce(end_date, ended_at)) %>%
+  mutate(duration = as.duration(ended_at - started_at)) %>%
+  select(!c("start_date","end_date","start_station","end_station","member_type")) %>%
+  mutate(member_casual = parse_factor(member_casual)) %>%
+  mutate(member_casual = fct_recode(member_casual, 
+                                    casual = "Casual", 
+                                    member = "Member" )) %>%
+  filter(duration > 60 & duration < (60*60*24)) #potential false starts and abandoned bikes
+  
+```
+
+# Questions 
+
+The following questions have been chosen for exploration: 
+
+1. How long are bike rides, and are there any differences between casual users
+and members? 
+
+2. In what months were most of the rides taken?
+
+3. Is duration correlated to distance?
+
+4. What are the most popular start and end stations?
+
+5. What time of the day are most of the rides taken, and what is their duration?
+
+Data visualisation that attempts to answer each question will be explored in its
+own section.
+
+# Analysis
+
+## How long are bike rides, and are there any differences between casual users and members?
+
+**Operationalisation**: use histograms to visualise the distribution of ride
+durations, divided into facets by user type (member or casual user)
+
+```{r, echo = FALSE, warning = FALSE}
+p1 <- ggplot(data = rides_clean %>% filter(duration < (60 * 60 * 4)), mapping = aes(x = duration/60)) +
+  geom_histogram(data = transform(rides_clean, member_casual = NULL),
+                 alpha = 0.3,
+                 binwidth = 5) +
+  geom_histogram(mapping = aes(fill = member_casual),
+                 colour = "black",
+                 binwidth = 5) +
+  facet_wrap(facets = vars(member_casual)) + 
+  scale_x_continuous(limits = c(0, 150),
+                     breaks = seq(from = 0, to = 150, by = 25)) +
+  scale_y_continuous(labels = scales::comma)
+
+p1 + labs(
+    x = "Duration in minutes",
+    y = "Number of rides",
+    fill = "Member or casual?",
+    title = "Histogram of number of rides vs ride duration, by user type"
+  ) +
+  geom_vline(xintercept = 30,
+             alpha = 0.5,
+             linetype = "dashed") +
+  annotate(
+     geom      = "curve", 
+  x         = 75, 
+  y         = 875000, 
+  xend      = 30, 
+  yend      = 750000,
+  curvature = 0,
+  arrow     = arrow(length = unit(1.5, "mm")),
+  alpha     = 0.8,
+  colour    = "#619F14"
+  ) +
+  annotate(
+    geom = "text",
+    x          = 75, 
+    y          = 875000, 
+    label      = "Rides longer than 30 min \nincur $2 extra fee",
+    hjust      = 0.1, vjust = -0.1,
+    lineheight = 0.8,
+    size = 3,
+    colour     = "#619F14"
+  ) + theme(
+    plot.title = element_text(size = rel(1.5)),
+    panel.grid.minor.y = element_blank(),
+    panel.grid.minor.x = element_blank()
+  )
+```
+
+Based on the plot, it is evident that the vast majority of users are members.
+Most members' rides last 5 minutes or less, whereas the ones for casual users 
+reach a peak between 10-20 minutes.
+This is a sensible finding as, according to the website, the first 30 minutes
+are included in the membership subscription, whereas casual users might find it 
+too expensive to pay $2 for a ride of 5 minutes or less. 
+In both cases, most rides are completed within 30 minutes, as there is a $2 
+additional fee to pay if the bike is returned later (see website).
+
+## In what months were most of the rides taken?
+
+**Operationalisation**: plot the number of rides against the time of the year
+(month and year), divided by user type, using a bar chart. 
+A stacked representation has been chosen to highlight the overall numbers.
+
+```{r, echo = FALSE}
+p2 <- ggplot(data = rides_clean %>% filter(duration < (60 * 60 * 4)), mapping = aes(x = floor_date(started_at, unit = "month"))) +
+         geom_bar(aes(fill = member_casual)) +
+  scale_x_datetime(date_labels = "%b %Y") +
+  scale_y_continuous(labels = scales::comma)
+
+p2 + labs(
+  x = "Month and year of ride",
+  y = "Number of rides",
+  fill = "Member or casual?",
+  title = "Number of rides vs time of the year, by type of user"
+) +
+  theme(
+    plot.title = element_text(size = rel(1.5))
+  )
+  
+```
+
+We can notice how bike rides peaked from Apr to Oct 2019, when the weather is warmer. 
+There was still a rising trend in 2020, but the Covid lockdown in Apr 2020 led 
+to a decrease in the number of users when compared to the same month in 2019. 
+Interestingly, the proportion of casual users increased, which is probably due to
+the fact that the uncertainty related to Covid made it more attractive to use bikes
+instead of public transport (eg. metro or bus), 
+but without the need for necessarily committing to a membership.
+
+## Is duration correlated to distance? 
+
+**Operationalisation**: by plotting a scatterplot of the differences between
+the start_lat and end_lat, and the start_long and end_long of bike rides, and 
+mapping colour to duration, we can observe whether there is a relationship 
+between distance between the stations and duration of the ride. 
+Since the area of Washington DC is small compared to 
+the area of the Earth, the difference between latitudes and longitudes is taken
+as a proxy of the distance, as we can ignore the curvature of the Earth.
+
+```{r, echo = FALSE, message = FALSE, warning = FALSE, fig.width = 8}
+rides_clean_latlng <- rides_clean %>% filter(!is.na(start_lat)) %>%
+  filter(duration < 60 * 60) %>%
+ mutate(lat_diff = end_lat - start_lat) %>%
+ mutate(lng_diff = end_lng - start_lng)
+
+p3 <- ggplot(data = rides_clean_latlng, mapping = aes(x = lat_diff, y = lng_diff)) +
+  geom_point(aes(colour = duration / 60)) +
+  scale_color_continuous(limits = c(0,60)) +
+  scale_color_gradient(low = "green", high = "red") +
+  scale_x_continuous(breaks = seq(from = -0.20, to = 0.20, by = 0.05)) +
+  scale_y_continuous(breaks = seq(from = -0.20, to = 0.20, by = 0.05)) +
+  coord_fixed(ratio = 1)
+
+p3 + labs(
+  x = "Difference in latitude",
+  y = "Difference in longitude",
+  colour = "Ride duration",
+  title = "Lat/lng difference by ride duration"
+) + theme(
+  plot.title = element_text(
+    size = rel(1.5),
+    hjust = 0
+  ),
+  panel.grid.minor = element_blank()
+)
+```
+
+As the plot clearly shows, there is a relationship between the difference in 
+longitude and latitude, and the duration of a ride. There also seems to be a 
+relatively symmetrical distribution of rides, with approximately as many rides 
+in the N-S direction(from -0.1 to 0.1 latitude difference) as in the W-E direction
+(again, from -0.1 to 0.1).
+
+## What are the most popular start and end stations?
+
+**Operationalisation**: column chart of the top 10 stations, ordered from highest 
+to lowest number of rides, for both start and end stations. 
+
+```{r echo = FALSE}
+p4_a <- rides_clean %>% group_by(start_station_name) %>%
+  count(sort = TRUE) %>%
+  ungroup() %>%
+  slice_head(n = 10) %>%
+  ggplot(mapping = aes(y = reorder(start_station_name, n), x = n)) +
+  geom_bar(stat = "identity", fill = "green") +
+  scale_x_continuous(breaks = seq(from = 0, to = 80000, length = 9), labels = scales::comma)
+
+p4_a +
+  labs(
+    x = "Number of rides",
+    y = "Start station name",
+    title = "Most popular start stations"
+  ) + 
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.background = element_blank(),
+    panel.ontop = TRUE,
+    plot.title = element_text(size = rel(1.5)),
+    axis.text.y = element_text(hjust = 0,
+                               size = 8,
+                               margin = margin(l = 10)),
+    plot.margin = margin(0,15,0,0)
+  )
+
+p4_b <- rides_clean %>% group_by(end_station_name) %>%
+  count(sort = TRUE) %>%
+  ungroup() %>%
+  slice_head(n = 10) %>%
+  ggplot(mapping = aes(y = reorder(end_station_name, n), x = n)) +
+  geom_bar(stat = "identity", fill = "purple") +
+  scale_x_continuous(breaks = seq(from = 0, to = 80000, length = 9), labels = scales::comma)
+
+p4_b +
+  labs(
+    x = "Number of rides",
+    y = "End station name",
+    title = "Most popular end stations"
+  ) + 
+  theme(
+    panel.grid.major.y = element_blank(),
+    panel.background = element_blank(),
+    panel.ontop = TRUE,
+    plot.title = element_text(size = rel(1.5)),
+    axis.text.y = element_text(hjust = 0,
+                               size = 8,
+                               margin = margin(l = 10)),
+    plot.margin = margin(0,15,0,0)
+  )
+```
+
+Albeit with slightly different ranking, it can be seen that the most popular
+start and end stations largely match, with *Columbus Circle/Union Station* and the
+*Lincoln Memorial* being the most popular. New Hampshire Ave & T St NW is the 
+4th start station by number of rides, but it is not in the top 10 end stations.
+On the other hand, the Massachusetts Ave & Dupont Circle NW is 5th in the most 
+popular end stations, but not in the top 10 start stations.
+
+## What time of the day are most of the rides taken, and what is their duration?
+
+```{r, echo = FALSE, fig.height= 4, fig.width= 8}
+p5 <- rides_clean %>% mutate(duration_class = case_when(
+  (duration/60) < 10 ~ "0-10 minutes",
+  (duration/60) < 20 ~ "10-20 minutes",
+  (duration/60) < 30 ~ "20-30 minutes",
+  (duration/60) >=30 ~ ">30 minutes")
+) %>% ggplot(mapping = aes(x = hour(started_at))) +
+  geom_bar(mapping = aes(fill = reorder(duration_class, -duration)), position="dodge") +
+  scale_x_continuous(breaks = 0:23) +
+  scale_y_continuous(labels = scales::comma)
+
+p5 + labs(
+  x = "Time of day (hours)",
+  y = "Number of rides",
+  fill = "Duration of rides",
+  title = "Number of rides vs time of day, by duration"
+) + theme(
+  panel.grid.minor.x = element_blank(),
+  panel.grid.minor.y = element_blank(),
+  plot.title = element_text(hjust = 0.5,
+                            size = rel(1.5))
+)
+
+```
+
+It can be easily observed how most of the rides (threshold for "most" defined as >50,000 
+for 0-10 minutes) occurred from 6AM till 9PM. For short trips of 0-10 minutes, there were two
+distinctive peaks at 8AM and 5PM, which match the time most people go to work
+and leave the workplace. This trend becomes less visible for rides of 
+longer duration, and disappears entirely for rides that lasted longer
+than 30 minutes, suggesting that people who rode for longer were doing it for 
+leisure and not for work purposes. 
+
+# Conclusions
+
+Analysis of this dataset has revealed that most users of the Capital BikeShare service
+have some form of membership, and that the service is largely used by commuters.
+Most rides last between 0-10 minutes for members and 10-20 minutes for casual
+users. The majority of rides occurred between Apr 2019 and Oct 2019. 
+Covid-19 has had a measurable impact on the numbers when compared month-on-month since Apr 
+2020 (~ 350,000 in Apr 2019 vs ~ 75,000 in Apr 2020).
+There seems not to be a preferential direction for rides, with roughly as many
+people riding in one direction, as those travelling the opposite way.
+The most popular station (for both start and end) is Columbus Circle/Union Station.
+
+An interesting question, raised by the analysis of the second point, is whether the recent
+trend of increasing casual users will continue over time, and if this will lead to 
+prices being adjusted to make membership more attractive (or casual use more expensive).
